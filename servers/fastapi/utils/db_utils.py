@@ -4,9 +4,11 @@ from urllib.parse import urlsplit, urlunsplit, parse_qsl
 import ssl
 
 
-def get_database_url_and_connect_args() -> tuple[str, dict]:
+def get_database_url_and_connect_args(db_name: str | None = None) -> tuple[str, dict]:
+    if not db_name:
+        db_name = "fastapi.db"
     database_url = get_database_url_env() or "sqlite:///" + os.path.join(
-        get_app_data_directory_env() or "/tmp/presenton", "fastapi.db"
+        get_app_data_directory_env() or "/tmp/presenton", db_name
     )
 
     if database_url.startswith("sqlite://"):

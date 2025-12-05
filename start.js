@@ -3,12 +3,15 @@
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { spawn } from "child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, createReadStream } from "fs";
+import httpProxy from "http-proxy";
+import http from "http";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const fastapiDir = join(__dirname, "servers/fastapi");
+const fastapiStaticDir = join(fastapiDir, "static");
 const nextjsDir = join(__dirname, "servers/nextjs");
 
 const args = process.argv.slice(2);
@@ -19,6 +22,7 @@ const canChangeKeys = process.env.CAN_CHANGE_KEYS !== "false";
 const fastapiPort = 8000;
 const nextjsPort = 3000;
 const appmcpPort = 8001;
+const proxyPort = 80;
 
 const userConfigPath = join(process.env.APP_DATA_DIRECTORY, "userConfig.json");
 const userDataDir = dirname(userConfigPath);
@@ -36,6 +40,7 @@ const setupNodeModules = () => {
       cwd: nextjsDir,
       stdio: "inherit",
       env: process.env,
+      shell: true,
     });
 
     npmProcess.on("error", (err) => {
@@ -115,6 +120,7 @@ const startServers = async () => {
       cwd: fastapiDir,
       stdio: "inherit",
       env: process.env,
+      shell: true,
     }
   );
 
@@ -129,6 +135,7 @@ const startServers = async () => {
       cwd: fastapiDir,
       stdio: "ignore",
       env: process.env,
+      shell: true,
     }
   );
 
@@ -151,6 +158,7 @@ const startServers = async () => {
       cwd: nextjsDir,
       stdio: "inherit",
       env: process.env,
+      shell: true,
     }
   );
 
@@ -158,22 +166,30 @@ const startServers = async () => {
     console.error("Next.js process failed to start:", err);
   });
 
-  const ollamaProcess = spawn("ollama", ["serve"], {
-    cwd: "/",
-    stdio: "inherit",
-    env: process.env,
-  });
+  const ollamaProcess = process.env.OLLAMA_URL
+    ? spawn("ollama", ["serve"], {
+      cwd: "/",
+      stdio: "inherit",
+      env: process.env,
+      shell: true,
+    })
+    : null;
 
-  ollamaProcess.on("error", (err) => {
-    console.error("Ollama process failed to start:", err);
-  });
+  if (ollamaProcess) {
+    ollamaProcess.on("error", (err) => {
+      console.error("Ollama process failed to start:", err);
+    });
+  }
 
   // Keep the Node process alive until both servers exit
-  const exitCode = await Promise.race([
+  const waiters = [
     new Promise((resolve) => fastApiProcess.on("exit", resolve)),
     new Promise((resolve) => nextjsProcess.on("exit", resolve)),
-    new Promise((resolve) => ollamaProcess.on("exit", resolve)),
-  ]);
+  ];
+  if (ollamaProcess) {
+    waiters.push(new Promise((resolve) => ollamaProcess.on("exit", resolve)));
+  }
+  const exitCode = await Promise.race(waiters);
 
   console.log(`One of the processes exited. Exit code: ${exitCode}`);
   process.exit(exitCode);
@@ -184,6 +200,7 @@ const startNginx = () => {
   const nginxProcess = spawn("service", ["nginx", "start"], {
     stdio: "inherit",
     env: process.env,
+    shell: true,
   });
 
   nginxProcess.on("error", (err) => {
@@ -199,6 +216,93 @@ const startNginx = () => {
   });
 };
 
+// Start npm HTTP proxy server
+const startHttpProxy = () => {
+  const proxy = httpProxy.createProxyServer({});
+
+  const server = http.createServer((req, res) => {
+    // Alias /static -> servers/fastapi/static
+    if (req.url.startsWith("/static")) {
+      const safePath = req.url.replace(/^\/static\/?/, "");
+      const filePath = join(fastapiStaticDir, safePath);
+
+      // Prevent path escape
+      if (!filePath.startsWith(fastapiStaticDir)) {
+        res.writeHead(403);
+        return res.end("Forbidden");
+      }
+
+      if (!existsSync(filePath)) {
+        res.writeHead(404);
+        return res.end("Not Found");
+      }
+
+      const ext = filePath.split(".").pop()?.toLowerCase();
+      const mime =
+        ext === "html" ? "text/html" :
+          ext === "js" ? "application/javascript" :
+            ext === "mjs" ? "application/javascript" :
+              ext === "css" ? "text/css" :
+                ext === "json" ? "application/json" :
+                  ext === "png" ? "image/png" :
+                    (ext === "jpg" || ext === "jpeg") ? "image/jpeg" :
+                      ext === "svg" ? "image/svg+xml" :
+                        ext === "gif" ? "image/gif" :
+                          ext === "webp" ? "image/webp" :
+                            ext === "ico" ? "image/x-icon" :
+                              "application/octet-stream";
+
+      res.writeHead(200, {
+        "Content-Type": mime,
+        "Cache-Control": "public, max-age=31536000, immutable"
+      });
+      return createReadStream(filePath).pipe(res);
+    }
+    // Route API requests to FastAPI
+    if (req.url.startsWith("/api/v1/")) {
+      proxy.web(req, res, { target: `http://localhost:${fastapiPort}` });
+    }
+    // Route MCP requests to FastAPI MCP server
+    else if (req.url.startsWith("/mcp")) {
+      proxy.web(req, res, { target: `http://localhost:${appmcpPort}` });
+    }
+    // Route docs to FastAPI
+    else if (req.url.startsWith("/docs") || req.url.startsWith("/openapi.json")) {
+      proxy.web(req, res, { target: `http://localhost:${fastapiPort}` });
+    }
+    // Route all other requests to Next.js
+    else {
+      proxy.web(req, res, {
+        target: `http://localhost:${nextjsPort}`,
+        ws: true // Enable WebSocket support
+      });
+    }
+  });
+
+  // Handle WebSocket upgrade
+  server.on('upgrade', (req, socket, head) => {
+    proxy.ws(req, socket, head, { target: `http://localhost:${nextjsPort}` });
+  });
+
+  proxy.on("error", (err, req, res) => {
+    console.error("Proxy error:", err);
+    res.writeHead(500, { "Content-Type": "text/plain" });
+    res.end("Proxy error");
+  });
+
+  server.listen(proxyPort, () => {
+    console.log(`Proxy server running on http://localhost:${proxyPort}`);
+  });
+};
+
+const startProxyServer = () => {
+  if (process.platform === "win32") {
+    startHttpProxy();
+  } else {
+    startNginx();
+  }
+};
+
 const main = async () => {
   if (isDev) {
     await setupNodeModules();
@@ -209,7 +313,7 @@ const main = async () => {
   }
 
   startServers();
-  startNginx();
+  startProxyServer();
 };
 
 main();

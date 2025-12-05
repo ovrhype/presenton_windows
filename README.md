@@ -1,3 +1,32 @@
+## Overview
+This repository is a fork of the [Presenton](https://github.com/presenton/presenton) project, enhanced with native Windows support. Instead of relying on Docker Compose for orchestration, this implementation provides a dedicated batch script (start.bat) that handles all necessary setup, dependency management, and execution processes directly on Windows systems.
+
+## Prerequisites
+Tested on:
+- Node.js v22.5.1
+- npm 10.8.2
+- Python 3.10.11
+
+## Usage
+1. Create a .env file using .env.example. Specify necessary environment variables. Example:
+```
+APP_DATA_DIRECTORY=C:\apps\presenton_windows\app_data
+TEMP_DIRECTORY=C:\Users\User\AppData\Local\Temp\presenton
+LLM=custom
+CUSTOM_LLM_URL=http://127.0.0.1:1234/v1
+CUSTOM_LLM_API_KEY=1
+CUSTOM_MODEL=google/gemma-3-27b
+```
+This is a setup for LM Studio with gemma3:27b model
+
+2. Run start.bat with `--install` flag to install necessary packages:
+```
+start.bat --install
+```
+3. Open http://localhost in your browser.
+
+4. Next time, simply run start.bat without any flag, to speed up the startup
+
 <p align="center">
   <img src="readme_assets/images/presenton-logo.png" height="90" alt="Presenton Logo" />
 </p>
