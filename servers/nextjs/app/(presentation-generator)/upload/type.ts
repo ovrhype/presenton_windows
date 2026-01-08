@@ -33,6 +33,7 @@ export enum LanguageType {
   Bengali = "Bengali (বাংলা)",
 
   // European Languages
+  Ukrainian = "Ukrainian (Українська)",
   Polish = "Polish (Polski)",
   Czech = "Czech (Čeština)",
   Slovak = "Slovak (Slovenčina)",
